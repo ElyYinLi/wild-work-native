@@ -1,0 +1,17 @@
+# 构建产物
+dist/
+build/
+android/app/build/
+android/.gradle/
+android/local.properties
+
+# 由 CI 从上游源码构建并注入，不入库（避免仓库里躺着几十 MB 二进制）
+android/app/src/main/jniLibs/arm64-v8a/libgateway.so
+android/app/src/main/assets/wild-work
+
+ios/build/
+ios/*.xcodeproj/
+DerivedData/
+
+.DS_Store
+*.log

@@ -1,0 +1,132 @@
+name: Build iOS IPA (Native)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: rockswang/wild-work
+  UPSTREAM_REF: master
+
+jobs:
+  build:
+    # macos-latest 是当前唯一可用标签（macos-14 已从公开池下线，会表现为 cancelled 且无 runner）
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Go
+        run: brew install go || brew upgrade go
+
+      - name: Fetch upstream source
+        run: |
+          curl -fsSL "https://codeload.github.com/${UPSTREAM_REPO}/tar.gz/refs/heads/${UPSTREAM_REF}" -o up.tgz
+          mkdir -p upstream
+          tar xzf up.tgz -C upstream --strip-components=1
+
+      # ------------------------------------------------------------------
+      # 内嵌网关尝试
+      #
+      # 已知约束：Go 对 ios/arm64 只允许外部链接（PIE + InternalLinkPIESupported=false），
+      # 而 CGO_ENABLED=1 的 ios 交叉编译需要 iPhoneOS SDK 的完整链接器链。
+      # 这里按「先试静态、再试 cgo」两级降级，任一级成功就内嵌完整网关。
+      # 全部失败时产出客户端版（连局域网网关），不让流水线红掉。
+      # ------------------------------------------------------------------
+      - name: Try build gateway (static)
+        id: gw1
+        continue-on-error: true
+        working-directory: upstream
+        env:
+          GOOS: ios
+          GOARCH: arm64
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p ../ios/WildWorkNative/Resources
+          go build -trimpath -ldflags "-s -w" -o ../ios/WildWorkNative/Resources/gateway ./cmd/wild-work
+
+      - name: Try build gateway (cgo + iPhoneOS SDK)
+        id: gw2
+        if: steps.gw1.outcome != 'success'
+        continue-on-error: true
+        working-directory: upstream
+        env:
+          GOOS: ios
+          GOARCH: arm64
+          CGO_ENABLED: 1
+        run: |
+          echo "静态失败，尝试 cgo 外链"
+          go build -trimpath -ldflags "-s -w" -o ../ios/WildWorkNative/Resources/gateway ./cmd/wild-work
+
+      - name: Detect gateway availability
+        id: gw
+        run: |
+          if [ -f ios/WildWorkNative/Resources/gateway ] && [ -s ios/WildWorkNative/Resources/gateway ]; then
+            echo "built=true" >> $GITHUB_OUTPUT
+            echo "已内嵌网关"; ls -lh ios/WildWorkNative/Resources/gateway
+          else
+            echo "built=false" >> $GITHUB_OUTPUT
+            echo "::warning::本机无法内嵌 Go 网关，产出客户端版"
+          fi
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: |
+          if [ "${{ steps.gw.outputs.built }}" != "true" ]; then
+            python3 ../scripts/strip_gateway_resource.py project.yml
+          fi
+          xcodegen generate
+
+      - name: Build unsigned app
+        working-directory: ios
+        run: |
+          xcodebuild \
+            -project WildWorkNative.xcodeproj \
+            -scheme WildWorkNative \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tail -60
+
+      - name: Package unsigned IPA
+        run: |
+          APP=$(find ios/build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -1)
+          echo "app: $APP"
+          test -n "$APP"
+          rm -rf out && mkdir -p out/Payload
+          cp -R "$APP" out/Payload/
+          cd out && zip -qry WildWorkNative.ipa Payload
+          ls -lh WildWorkNative.ipa
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WildWorkNative-ipa
+          path: out/WildWorkNative.ipa
+
+      - name: Publish rolling release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ios-latest
+          name: iOS 最新构建（未签名）
+          body: |
+            构建提交：`${{ github.sha }}`
+            内置网关：**${{ steps.gw.outputs.built }}**
+
+            这是**未签名** IPA，需用 SideStore / Sideloadly 自签后安装。
+
+            > 若「内置网关」为 false，则本包为**客户端版**：需要在同一局域网内有一台设备
+            > 运行网关（Android 版或电脑版），首次启动时填写其地址。
+            > 原因见 docs/MAINTENANCE.md 「iOS 为何可能无法内嵌网关」。
+          files: out/WildWorkNative.ipa
+          make_latest: false

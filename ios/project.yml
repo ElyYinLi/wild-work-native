@@ -1,0 +1,50 @@
+name: WildWorkNative
+
+options:
+  bundleIdPrefix: com.wildwork
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+
+targets:
+  WildWorkNative:
+    type: application
+    platform: iOS
+    sources:
+      - path: WildWorkNative
+        excludes:
+          - "Resources/**"
+      # Go 网关可执行文件：作为 bundle 根目录资源整体拷入，不能放进子目录
+      - path: WildWorkNative/Resources/gateway
+        type: file
+        buildPhase: resources
+    info:
+      path: WildWorkNative/Info.plist
+      properties:
+        CFBundleDisplayName: WildWork
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UIStatusBarStyle: UIStatusBarStyleLightContent
+        UIViewControllerBasedStatusBarAppearance: false
+        # 网关只监听 127.0.0.1，但仍需允许明文 HTTP
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
+        NSLocalNetworkUsageDescription: 需要本机网络权限以运行内置网关服务。
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.wildwork.nativeapp
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "5.0"
+        ENABLE_BITCODE: NO
+        IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # 允许执行 bundle 内的可执行文件（自签自用）
+        CODE_SIGN_ENTITLEMENTS: ""

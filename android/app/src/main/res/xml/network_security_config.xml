@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- 面板可能部署在局域网 HTTP 上；这里只放开明文，不做证书校验降级。
+         iOS 侧对应 Info.plist 的 NSAllowsArbitraryLoadsInWebContent。 -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
