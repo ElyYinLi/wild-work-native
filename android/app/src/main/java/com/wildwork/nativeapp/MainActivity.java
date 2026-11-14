@@ -3,6 +3,7 @@ package com.wildwork.nativeapp;
 import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -100,11 +101,13 @@ public class MainActivity extends Activity implements GatewayService.Listener {
         logo.setTextSize(30);
         logo.setTextColor(Color.WHITE);
         logo.setGravity(Gravity.CENTER);
-        logo.setBackground(new android.graphics.drawable.GradientDrawable() {{
-            setCornerRadius(dp(20));
-            setColors(new int[]{Color.parseColor("#4F8DFD"), Color.parseColor("#7C6CFF")},
-                    new float[]{0f, 1f}, android.graphics.drawable.GradientDrawable.Orientation.TL_BR);
-        }});
+        GradientDrawable logoBg = new GradientDrawable();
+        logoBg.setShape(GradientDrawable.RECTANGLE);
+        logoBg.setCornerRadius(dp(20));
+        // setColors(int[]) 是 API 16+ 的重载；带 positions 的重载需要 ColorStateList，此处用简单双色渐变即可
+        logoBg.setColors(new int[]{Color.parseColor("#4F8DFD"), Color.parseColor("#7C6CFF")});
+        logoBg.setOrientation(GradientDrawable.Orientation.TL_BR);
+        logo.setBackground(logoBg);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(64), dp(64));
         lp.topMargin = dp(120);
         bootView.addView(logo, lp);
