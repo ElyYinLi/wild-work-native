@@ -44,7 +44,17 @@
 | 平台 | 文件 | 说明 |
 |------|------|------|
 | Android | `WildWorkNative.apk` | 需 arm64-v8a（现代手机基本都是） |
-| iOS | `WildWorkNative.ipa` | 未签名，需自签；能否内嵌网关见 Release 说明 |
+| iOS | `WildWorkNative.ipa` | 未签名，需自签（SideStore / Sideloadly） |
+
+两个平台都已实测内嵌网关，装上即可用，无需任何外部服务。
+
+### 首次使用
+
+1. 打开 App，等待启动页显示「就绪」（首次约 1–3 秒，只是解压与启动网关）
+2. 进入面板 → 点渠道按钮（如 `+ WorkBuddyCN`）添加账号
+3. 到「设置」里把监听地址改成 `0.0.0.0` 并**设置管理密码**——这样局域网里的其它设备
+   （电脑上的 Claude Code、Cherry Studio 等）也能用手机上的 API
+4. 面板顶栏会显示 API 地址与 Key，填到客户端即可
 
 ## 构建
 
