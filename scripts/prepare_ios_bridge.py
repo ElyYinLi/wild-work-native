@@ -81,10 +81,8 @@ func WildWorkStart(home *C.char, port C.int) C.int {
 	}
 
 	// 数据目录：必须在任何 init 之前设置，workDir() 会在 main 开头读它。
+	// 只覆盖 WILDWORK_HOME —— 不动 HOME/TMPDIR，避免影响同进程里的 WKWebView。
 	_ = os.Setenv("WILDWORK_HOME", dir)
-	_ = os.Setenv("HOME", dir)
-	_ = os.Setenv("TMPDIR", filepath.Join(dir, "tmp"))
-	_ = os.MkdirAll(filepath.Join(dir, "tmp"), 0o755)
 
 	// 日志同时写 stderr 和 <home>/gateway.log：
 	// iOS 没有可读的 stdout/stderr，落盘是唯一能在 App 里排查的手段。
