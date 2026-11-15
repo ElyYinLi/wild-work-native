@@ -84,7 +84,14 @@ def main() -> int:
         return 1
 
     tmp = Path(tempfile.mkdtemp(prefix="verify-ipa-"))
+    # Python 的 extractall 不恢复 unix 权限，所以额外从 zip 条目里读一遍 mode。
+    # 装机工具（LiveContainer / SideStore）复制 bundle 时会沿用 zip 里的权限位。
+    zip_modes: dict[str, int] = {}
     with zipfile.ZipFile(ipa) as z:
+        for info in z.infolist():
+            mode = (info.external_attr >> 16) & 0xFFFF
+            if mode:
+                zip_modes[info.filename] = mode
         z.extractall(tmp)
 
     payload = tmp / "Payload"
@@ -159,8 +166,11 @@ def main() -> int:
     else:
         c.ok(f"主可执行文件 {size / 1_048_576:.1f} MB")
 
-    if not (exe.stat().st_mode & 0o111):
-        c.fail("主可执行文件没有执行位")
+    zip_mode = zip_modes.get(f"Payload/{app.name}/{exe_name}", 0)
+    has_exec = bool(zip_mode & 0o111) if zip_mode else bool(exe.stat().st_mode & 0o111)
+    if not has_exec:
+        c.fail("主可执行文件没有执行位（zip 条目与磁盘都没有）——"
+               "装机后 posix_spawn 会报 Bad file descriptor")
     else:
         c.ok("主可执行文件带执行位")
 
@@ -187,24 +197,14 @@ def main() -> int:
             c.note("未在二进制里找到明显 Go runtime 字符串（静态链接可能被裁剪，非致命）")
 
     # ---- 5. 图标 ----
+    # 两条合法路径，满足任一即可：
+    #   (a) asset catalog 编译产物 Assets.car（actool 正常）
+    #   (b) 传统 CFBundleIconFiles + bundle 根目录的 AppIcon*.png（inject_icons.py 兜底）
     has_car = (app / "Assets.car").is_file()
     icons = info.get("CFBundleIcons", {})
     primary = icons.get("CFBundlePrimaryIcon", {}) if isinstance(icons, dict) else {}
     icon_files = primary.get("CFBundleIconFiles") or info.get("CFBundleIconFiles") or []
 
-    if has_car:
-        c.ok(f"Assets.car 存在（{ (app / 'Assets.car').stat().st_size / 1024:.0f} KB）")
-    else:
-        c.fail("缺少 Assets.car —— actool 没有执行，桌面图标必然空白")
-
-    if icon_files:
-        c.ok(f"Info.plist 图标键 = {icon_files}")
-    elif has_car:
-        c.note("Info.plist 无 CFBundleIcons（actool 会自动注入，下面按文件兜底检查）")
-    else:
-        c.fail("既没有 Assets.car，也没有 CFBundleIconFiles")
-
-    # 图标像素尺寸：找 bundle 内最大的 AppIcon*.png
     best = 0
     for png in app.glob("AppIcon*.png"):
         try:
@@ -213,12 +213,26 @@ def main() -> int:
             best = max(best, min(w, h))
         except Exception:
             pass
+
+    if has_car:
+        c.ok(f"Assets.car 存在（{(app / 'Assets.car').stat().st_size / 1024:.0f} KB）")
+    if icon_files:
+        c.ok(f"Info.plist 图标键 = {icon_files}")
     if best >= args.min_icon:
         c.ok(f"bundle 内有 {best}px 图标")
-    elif has_car:
-        c.note("bundle 内无独立 PNG（图标只在 Assets.car 里，正常）")
+
+    if has_car or (icon_files and best >= args.min_icon):
+        if not has_car:
+            c.note("走传统 CFBundleIconFiles 路径（actool 未产出 Assets.car，"
+                   "可能 xcodegen 配置或 Xcode 版本异常；图标仍会显示）")
     else:
-        c.fail(f"找不到 ≥{args.min_icon}px 的图标资源")
+        if not has_car:
+            c.fail("缺少 Assets.car —— actool 没有执行")
+        if not icon_files:
+            c.fail("Info.plist 没有 CFBundleIconFiles")
+        if best < args.min_icon:
+            c.fail(f"找不到 ≥{args.min_icon}px 的图标资源")
+        c.fail("桌面图标会是空白")
 
     # ---- 6. 不该出现的东西 ----
     if (app / "Frameworks").is_dir():
