@@ -11,6 +11,8 @@ permissions:
 env:
   UPSTREAM_REPO: rockswang/wild-work
   UPSTREAM_REF: master
+  # 与 project.yml 的 IPHONEOS_DEPLOYMENT_TARGET 保持一致
+  IOS_MIN: "15.0"
 
 jobs:
   build:
@@ -30,48 +32,34 @@ jobs:
           tar xzf up.tgz -C upstream --strip-components=1
 
       # ------------------------------------------------------------------
-      # 内嵌网关尝试
+      # Go 网关 -> 静态库（c-archive）
       #
-      # 已知约束：Go 对 ios/arm64 只允许外部链接（PIE + InternalLinkPIESupported=false），
-      # 而 CGO_ENABLED=1 的 ios 交叉编译需要 iPhoneOS SDK 的完整链接器链。
-      # 这里按「先试静态、再试 cgo」两级降级，任一级成功就内嵌完整网关。
-      # 全部失败时产出客户端版（连局域网网关），不让流水线红掉。
+      # 不用子进程：iOS 只允许 exec「带有效签名、位于 app bundle 内」的 Mach-O。
+      # 未签名 IPA 经 LiveContainer / SideStore 重签时只签主可执行文件，
+      # Resources 里的裸二进制既不会被签也过不了 posix_spawn 校验，
+      # 表现就是 `Bad file descriptor` 或启动即被 SIGKILL。
+      #
+      # c-archive 把网关直接链进主 Mach-O，没有子进程，重签与否都能跑。
+      # 这一步失败即整个流水线失败——不再产出「客户端版」半成品。
       # ------------------------------------------------------------------
-      - name: Try build gateway (static)
-        id: gw1
-        continue-on-error: true
-        working-directory: upstream
-        env:
-          GOOS: ios
-          GOARCH: arm64
-          CGO_ENABLED: 0
+      - name: Build Go gateway as static library
         run: |
-          mkdir -p ../ios/WildWorkNative/Resources
-          go build -trimpath -ldflags "-s -w" -o ../ios/WildWorkNative/Resources/gateway ./cmd/wild-work
-
-      - name: Try build gateway (cgo + iPhoneOS SDK)
-        id: gw2
-        if: steps.gw1.outcome != 'success'
-        continue-on-error: true
-        working-directory: upstream
-        env:
-          GOOS: ios
-          GOARCH: arm64
-          CGO_ENABLED: 1
-        run: |
-          echo "静态失败，尝试 cgo 外链"
-          go build -trimpath -ldflags "-s -w" -o ../ios/WildWorkNative/Resources/gateway ./cmd/wild-work
-
-      - name: Detect gateway availability
-        id: gw
-        run: |
-          if [ -f ios/WildWorkNative/Resources/gateway ] && [ -s ios/WildWorkNative/Resources/gateway ]; then
-            echo "built=true" >> $GITHUB_OUTPUT
-            echo "已内嵌网关"; ls -lh ios/WildWorkNative/Resources/gateway
-          else
-            echo "built=false" >> $GITHUB_OUTPUT
-            echo "::warning::本机无法内嵌 Go 网关，产出客户端版"
-          fi
+          set -euo pipefail
+          python3 scripts/prepare_ios_bridge.py upstream bridge
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          CC=$(xcrun --sdk iphoneos --find clang)
+          echo "SDK=$SDK"
+          mkdir -p ios/WildWorkNative/Resources
+          cd bridge
+          export CGO_ENABLED=1 GOOS=ios GOARCH=arm64 CC="$CC"
+          # -arch 由 Go 自己按 GOARCH 追加，这里只补 sysroot 与最低系统版本
+          export CGO_CFLAGS="-isysroot $SDK -miphoneos-version-min=${IOS_MIN}"
+          export CGO_LDFLAGS="-isysroot $SDK -miphoneos-version-min=${IOS_MIN}"
+          go build -buildmode=c-archive -trimpath -ldflags "-s -w" \
+            -o ../ios/WildWorkNative/Resources/libwildwork.a ./cmd/wild-work
+          ls -lh ../ios/WildWorkNative/Resources/libwildwork.*
+          # 头文件必须存在，否则 Swift 的 bridging header 会找不到声明
+          grep -q "WildWorkStart" ../ios/WildWorkNative/Resources/libwildwork.h
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -79,14 +67,21 @@ jobs:
       - name: Generate Xcode project
         working-directory: ios
         run: |
-          if [ "${{ steps.gw.outputs.built }}" != "true" ]; then
-            python3 ../scripts/strip_gateway_resource.py project.yml
-          fi
+          set -euo pipefail
           xcodegen generate
+          # asset catalog 必须在 resources build phase，否则 actool 不跑、没有 Assets.car
+          PBX=WildWorkNative.xcodeproj/project.pbxproj
+          if ! grep -q "Assets.xcassets in Resources" "$PBX"; then
+            echo "::error::Assets.xcassets 没有被加入 Resources build phase，桌面图标会是空白"
+            exit 1
+          fi
 
       - name: Build unsigned app
         working-directory: ios
         run: |
+          set -euo pipefail
+          # 注意：这里绝不能接 `| tail`。管道会把 xcodebuild 的退出码换成 tail 的 0，
+          # 构建失败也能过，最后对着残缺目录打出「只有一个文件」的坏 IPA。
           xcodebuild \
             -project WildWorkNative.xcodeproj \
             -scheme WildWorkNative \
@@ -96,17 +91,34 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build 2>&1 | tail -60
+            build > build.log 2>&1 || { tail -120 build.log; exit 1; }
+          tail -15 build.log
 
-      - name: Package unsigned IPA
+      - name: Package + verify unsigned IPA
         run: |
+          set -euo pipefail
           APP=$(find ios/build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -1)
           echo "app: $APP"
           test -n "$APP"
+          ls -la "$APP"
+
+          # 图标兜底：actool 正常时自动跳过
+          python3 scripts/inject_icons.py "$APP"
+
+          # 主可执行文件必须有执行位。签名被关掉后 Xcode 偶发不设 0755，
+          # 打出来的 IPA 在设备上会 `posix_spawn` 失败（Bad file descriptor）。
+          chmod 0755 "$APP/WildWork"
+
           rm -rf out && mkdir -p out/Payload
-          cp -R "$APP" out/Payload/
-          cd out && zip -qry WildWorkNative.ipa Payload
-          ls -lh WildWorkNative.ipa
+          cp -R -p "$APP" out/Payload/
+          cd out && zip -qry WildWorkNative.ipa Payload && cd ..
+          ls -lh out/WildWorkNative.ipa
+
+          # 硬校验：结构 / Info.plist 键 / arm64 Mach-O / Go 符号 / 图标
+          python3 scripts/verify_ipa.py out/WildWorkNative.ipa \
+            --app-name WildWork \
+            --bundle-id com.wildwork.nativeapp \
+            --require-go
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
@@ -121,12 +133,14 @@ jobs:
           name: iOS 最新构建（未签名）
           body: |
             构建提交：`${{ github.sha }}`
-            内置网关：**${{ steps.gw.outputs.built }}**
 
-            这是**未签名** IPA，需用 SideStore / Sideloadly 自签后安装。
+            单文件 IPA：Go 网关已静态链接进主可执行文件，**不需要电脑、不需要局域网服务端**，
+            装上就能用（Web UI 跑在 app 内，服务监听 127.0.0.1:7863）。
 
-            > 若「内置网关」为 false，则本包为**客户端版**：需要在同一局域网内有一台设备
-            > 运行网关（Android 版或电脑版），首次启动时填写其地址。
-            > 原因见 docs/MAINTENANCE.md 「iOS 为何可能无法内嵌网关」。
+            安装方式：LiveContainer / SideStore / TrollStore 直接导入本 IPA；
+            或 Sideloadly / AltStore 用你自己的证书自签。
+
+            > 若提示签名相关错误，那是重签工具的问题，不是包结构问题——
+            > 本包通过了 `scripts/verify_ipa.py` 的全项校验（Info.plist / arm64 / Go 符号 / 图标）。
           files: out/WildWorkNative.ipa
           make_latest: false

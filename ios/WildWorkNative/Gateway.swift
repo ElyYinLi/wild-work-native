@@ -1,147 +1,118 @@
 import Foundation
-import UIKit
 
-/// 网关进程管理（iOS）。
+/// iOS 网关控制器。
 ///
-/// 与 Android 的 GatewayService 对应：把 Go 网关作为子进程拉起，数据目录指到沙盒。
+/// 与 Android 的 GatewayService 语义一致（同一个 Go 网关、同一份数据目录布局），
+/// 但**实现方式完全不同**：
 ///
-/// iOS 的特殊约束：
-///   - App 沙盒内**允许** exec 自己 bundle 里的可执行文件（App Store 审核不允许，自签自用没问题）；
-///   - bundle 内容不可写，所以 WILDWORK_HOME 必须指到沙盒 Documents；
-///   - 进程随 App 退到后台可能被挂起，回到前台时需检查并在必要时重启。
+///   Android：把 `libgateway.so`（aarch64 PIE）复制到私有目录后 exec。
+///   iOS    ：把网关编成静态库（`-buildmode=c-archive`）直接链进主 Mach-O，
+///            由 `WildWorkStart()` 在进程内拉起 goroutine。
+///
+/// 为什么 iOS 不能照搬子进程方案：iOS 内核只允许执行「带有效签名、且位于
+/// app bundle 内被声明为可执行」的 Mach-O。未签名 IPA 经 LiveContainer /
+/// SideStore 重签时，只会签主可执行文件，Resources 里的裸二进制既不会被签、
+/// 也无法通过 `posix_spawn` 的校验，一律 `Bad file descriptor` / SIGKILL。
+/// 静态库方案没有子进程，重签与否都不影响，这是唯一可靠的路子。
 final class Gateway {
 
-    static let port = 7863
+    /// 与桌面版默认端口一致，面板里写死的 upstream 地址也是这个。
+    static let port: Int32 = 7863
 
-    private var process: Process?
     private let logLock = NSLock()
     private var tail: [String] = []
     private var onLog: ((String) -> Void)?
+    private var started = false
+    private var logOffset: UInt64 = 0
 
+    /// 沙盒内可写目录。bundle 只读且重装即清空，配置与账号必须放这里。
     var dataDir: URL {
         let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("wildwork", isDirectory: true)
     }
 
+    private var logURL: URL { dataDir.appendingPathComponent("gateway.log") }
+
     func setLogHandler(_ h: @escaping (String) -> Void) {
         onLog = h
     }
 
-    private var binaryPath: String? {
-        let name = "gateway"
-        if let p = Bundle.main.path(forResource: name, ofType: nil) {
-            return p
-        }
-        return Bundle.main.bundlePath + "/" + name
-    }
+    /// 端口可连通即视为服务活着（静态库与 App 同生命周期，无法被单独杀掉）。
+    var isRunning: Bool { started && probePort() }
 
-    var isRunning: Bool {
-        guard let p = process else { return false }
-        return p.isRunning
-    }
-
-    /// 启动网关。已完成启动则直接返回 true。
+    /// 启动网关。已就绪则直接返回 true。
     @discardableResult
     func start() -> Bool {
-        if isRunning && probePort() { return true }
-        stop()
-
-        guard let bin = binaryPath, FileManager.default.fileExists(atPath: bin) else {
-            appendLog("[gateway] 缺少内置可执行文件 gateway")
-            return false
-        }
-        // 兜底：从 bundle 拷到 Documents 再 exec，规避个别签名的执行限制
-        var exec = bin
-        if !FileManager.default.isExecutableFile(atPath: bin) {
-            let tmp = dataDir.appendingPathComponent("gateway-bin")
-            try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
-            try? FileManager.default.removeItem(at: tmp)
-            do {
-                try FileManager.default.copyItem(atPath: bin, toPath: tmp.path)
-                exec = tmp.path
-            } catch {
-                appendLog("[gateway] 复制可执行文件失败：\(error.localizedDescription)")
-            }
-        }
-
-        let fm = FileManager.default
-        try? fm.createDirectory(at: dataDir, withIntermediateDirectories: true)
-
-        // 首次运行写入最小配置：只监听本机
-        let cfgURL = dataDir.appendingPathComponent("config.json")
-        if !fm.fileExists(atPath: cfgURL.path) {
-            let json = "{\n  \"listen\": { \"host\": \"127.0.0.1\", \"port\": \(Gateway.port) }\n}\n"
-            try? json.write(to: cfgURL, atomically: true, encoding: .utf8)
-        }
-
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: exec)
-        p.arguments = ["--no-tray"]
-        p.currentDirectoryURL = dataDir
-        var env = ProcessInfo.processInfo.environment
-        env["WILDWORK_HOME"] = dataDir.path
-        env["HOME"] = dataDir.path
-        env["TMPDIR"] = FileManager.default.temporaryDirectory.path
-        p.environment = env
-
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = pipe
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] h in
-            let d = h.availableData
-            guard !d.isEmpty, let s = String(data: d, encoding: .utf8) else { return }
-            for line in s.split(separator: "\n", omittingEmptySubsequences: true) {
-                self?.appendLog(String(line))
-            }
-        }
-        p.terminationHandler = { [weak self] proc in
-            self?.appendLog("[gateway] 进程退出 code=\(proc.terminationStatus)")
-        }
+        if started && probePort() { return true }
 
         do {
-            try p.run()
-            process = p
-            appendLog("[gateway] 已启动 pid=\(p.processIdentifier)")
+            try FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
         } catch {
-            appendLog("[gateway] 启动失败：\(error.localizedDescription)")
+            appendLog("[gateway] 创建数据目录失败：\(error.localizedDescription)")
             return false
         }
 
-        for _ in 0..<80 {
+        // 首次启动把日志游标移到文件末尾，避免把上一次运行的日志当成本次输出
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: logURL.path),
+           let size = attrs[.size] as? UInt64 {
+            logOffset = size
+        }
+
+        let rc = dataDir.path.withCString { path in
+            WildWorkStart(UnsafeMutablePointer(mutating: path), Gateway.port)
+        }
+        guard rc == 0 else {
+            appendLog("[gateway] WildWorkStart 失败，返回码 \(rc)")
+            return false
+        }
+        started = true
+        appendLog("[gateway] 内嵌网关已启动，等待端口 \(Gateway.port)…")
+
+        for _ in 0..<120 {  // 最多 30s：首次启动要建目录、扫账号、初始化调度器
+            pumpLog()
             if probePort() { return true }
-            if !p.isRunning { break }
             Thread.sleep(forTimeInterval: 0.25)
         }
-        return p.isRunning && probePort()
+        appendLog("[gateway] 端口未就绪")
+        return false
     }
 
+    /// 静态库与 App 同生命周期，无需（也无法）主动 stop。
+    /// 保留方法是为了与 Android 侧接口对齐。
     func stop() {
-        guard let p = process else { return }
-        process = nil
-        if p.isRunning {
-            p.terminate()
-            // Go 默认把 SIGTERM 转成退出；2 秒不退则强杀
-            DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-                if p.isRunning { kill(p.processIdentifier, SIGKILL) }
-            }
+        // no-op
+    }
+
+    /// 读 `<home>/gateway.log` 的增量内容回调给 UI。
+    /// iOS 没有可读的 stdout，Go 侧把日志同时写进这个文件。
+    func pumpLog() {
+        guard let handle = try? FileHandle(forReadingFrom: logURL) else { return }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        guard size > logOffset else { return }
+        try? handle.seek(toOffset: logOffset)
+        let data = (try? handle.readToEnd()) ?? Data()
+        logOffset = size
+        guard let text = String(data: data, encoding: .utf8) else { return }
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            appendLog(String(line))
         }
     }
 
     private func probePort() -> Bool {
-        var ok = false
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = UInt16(Gateway.port).bigEndian
         addr.sin_addr.s_addr = inet_addr("127.0.0.1")
         let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
         defer { close(fd) }
         let r = withUnsafePointer(to: &addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
-        ok = (r == 0)
-        return ok
+        return r == 0
     }
 
     /// 读 /api/state 判断 HTTP 层是否真的就绪（端口通 ≠ 服务可用）
@@ -165,9 +136,10 @@ final class Gateway {
         logLock.lock()
         tail.append(line)
         if tail.count > 200 { tail.removeFirst() }
+        let snapshot = tail.suffix(8).joined(separator: "\n")
         logLock.unlock()
         let cb = onLog
-        DispatchQueue.main.async { cb?(line) }
+        DispatchQueue.main.async { cb?(snapshot) }
     }
 
     func recentLog() -> String {
