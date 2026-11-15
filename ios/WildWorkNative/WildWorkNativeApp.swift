@@ -8,7 +8,6 @@ struct WildWorkNativeApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(runner)
-                .prefersHomeIndicatorAutoHidden(false)
         }
     }
 }
