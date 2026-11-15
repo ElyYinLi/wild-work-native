@@ -200,7 +200,9 @@ CI 在打包后强制执行 `scripts/verify_ipa.py`，任一项不过就红：
 | iOS 装完桌面无图标、App 内正常 | 缺 Assets.car / CFBundleIcons | 同上；`inject_icons.py` 已做兜底 |
 | iOS 桌面名字显示为 `Unknown` | `CFBundleExecutable` 为空 | 同上，根因是 Info.plist 缺失 |
 | iOS 装完秒退 | 静态库被 dead-strip / 签名被破坏 | 确认 `DEAD_CODE_STRIPPING: NO`；换 SideStore 重签试试 |
-| CI 里 iOS job `cancelled` 且无 runner | runner 标签不可用 | 只用 `macos-latest`；`macos-14` 已下线 |
+| CI 报 `缺少 systrayfix 目录` | 上游已把 energye/systray 修好，删掉了补丁目录 | 脚本会自动清掉 go.mod 里指向它的 `replace` 行，正常现象 |
+| `prefersHomeIndicatorAutoHidden` 编译错误 | 它是 UIViewController 的属性，不是 SwiftUI View 的修饰符 | 已从 `WildWorkNativeApp.swift` 移除 |
+| CI 里 iOS job `cancelled` 且无 runner | runner 标签不可用 / 私有仓库未绑支付方式 | 只用 `macos-latest`；Free 账号的私有仓库跑 macOS runner 需要已验证的付款方式 |
 
 ---
 

@@ -54,6 +54,29 @@ class Check:
         self.notes.append(msg)
 
 
+def png_dimensions(path: Path) -> tuple[int, int] | None:
+    """读 PNG 宽高。
+
+    不能硬编码偏移 16：Xcode 会用 pngcrush 产出 CgBI 变体，块顺序变成
+    CgBI → IHDR，宽高位置随之后移。统一按块扫描找 IHDR。
+    """
+    try:
+        data = path.read_bytes()[:4096]
+    except Exception:
+        return None
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    i = 8
+    while i + 8 <= len(data):
+        length = struct.unpack(">I", data[i:i + 4])[0]
+        ctype = data[i + 4:i + 8]
+        if ctype == b"IHDR":
+            w, h = struct.unpack(">II", data[i + 8:i + 16])
+            return w, h
+        i += 12 + length
+    return None
+
+
 def macho_cputype(path: Path) -> int | None:
     """读 Mach-O 头拿 cputype；不是 Mach-O 返回 None。"""
     with path.open("rb") as f:
@@ -207,12 +230,9 @@ def main() -> int:
 
     best = 0
     for png in app.glob("AppIcon*.png"):
-        try:
-            data = png.read_bytes()[16:24]
-            w, h = struct.unpack(">II", data)
-            best = max(best, min(w, h))
-        except Exception:
-            pass
+        sz = png_dimensions(png)
+        if sz:
+            best = max(best, min(sz))
 
     if has_car:
         c.ok(f"Assets.car 存在（{(app / 'Assets.car').stat().st_size / 1024:.0f} KB）")

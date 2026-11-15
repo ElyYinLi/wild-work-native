@@ -39,14 +39,24 @@ SLOTS = [
 
 
 def png_size(path: Path) -> tuple[int, int] | None:
+    """按块扫描找 IHDR。
+
+    Xcode 用 pngcrush 产出的 CgBI 变体把 CgBI 块插在 IHDR 之前，硬编码偏移 16
+    会读到垃圾值，导致尺寸匹配全部落空。
+    """
     try:
-        data = path.read_bytes()[:24]
-        if data[:8] != b"\x89PNG\r\n\x1a\n":
-            return None
-        w, h = struct.unpack(">II", data[16:24])
-        return w, h
+        data = path.read_bytes()[:4096]
     except Exception:
         return None
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    i = 8
+    while i + 8 <= len(data):
+        length = struct.unpack(">I", data[i:i + 4])[0]
+        if data[i + 4:i + 8] == b"IHDR":
+            return struct.unpack(">II", data[i + 8:i + 16])
+        i += 12 + length
+    return None
 
 
 def main() -> int:
