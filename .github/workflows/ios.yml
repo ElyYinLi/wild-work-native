@@ -22,6 +22,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Verify container tweaks parity
+        run: python3 scripts/check_panel_tweaks.py
+
       - name: Install Go
         run: brew install go || brew upgrade go
 

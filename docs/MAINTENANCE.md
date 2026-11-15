@@ -187,6 +187,76 @@ CI 在打包后强制执行 `scripts/verify_ipa.py`，任一项不过就红：
 
 ---
 
+## 容器注入层（移动端 UI 适配）
+
+> 一句话：**不改上游一行代码**，所有手机端适配都是 WebView 加载完面板后由容器注入的一段 JS/CSS。
+> 上游 master 每次更新，这套注入自动作用于新面板，不需要重放补丁。
+
+### 两份脚本，必须逐行一致
+
+| 平台 | 位置 | 注入时机 |
+|------|------|---------|
+| iOS | `ios/WildWorkNative/RootView.swift` → `PanelTweaks.script` | `WKUserScript(.atDocumentEnd)` + `didFinish` 兜底各一次（幂等） |
+| Android | `android/.../PanelTweaks.java` → `SCRIPT` | `WebViewClient.onPageFinished` → `evaluateJavascript` |
+
+改动**任意一处就必须同步另一处**。CI 两个 workflow 的第一步都会跑
+`python3 scripts/check_panel_tweaks.py` 做逐行比对 + 关键项检查，不同步直接让构建失败。
+脚本本身用 `"""` 三引号块提取，别把三引号改成别的引号形式。
+
+注入做了四件事（顺序即脚本里的编号）：
+
+1. **安全区**：把 viewport meta 补上 `viewport-fit=cover`，注入
+   `body{padding-top:env(safe-area-inset-top)}` 与 `#app` 的底部 padding。
+   iOS 侧 `PanelView` 必须 `.ignoresSafeArea(.all)`；Android 无安全区，`env()` 为 0，天然无害。
+2. **虚拟账号说明**：给 `.acct-card[data-na="1"]` 加纯 CSS `::after` 常驻标签。
+   手机没有 hover，上游把「固定账号，不可删除」放在 `title` 里，用户永远看不到，
+   会误以为是删不掉的僵尸账号。用 CSS 伪元素而不是 MutationObserver——上游每秒都在改
+   `[data-fb-epoch]` 文本，常驻观察器反而会拖慢页面。
+3. **桌面文案清理**：TreeWalker 遍历文本节点，去掉 footer 的「· 右键托盘图标退出」，
+   并把帮助第 8/9 条的「exe 目录」「托盘菜单」「右键托盘退出」改成移动端说法。
+4. **首次启动收起**：清一次上游的 `acct-show-na`（`SHOW_NA_KEY`）。上游会持久化
+   「展开虚拟账号」的状态，手机误触一次就再也收不回去。用自建的 `ww-mobile-booted`
+   保证只清首次，用户之后主动展开仍被尊重。
+
+### 关于那两个「删不掉的虚拟账户」
+
+**不是脏数据，也不是 bug。** `oczen`（OpenCodeZen 匿名通道）与 `kilo`（Kilo 免费池）
+是两条**免密免费渠道**，上游会各自生成一个虚拟账号占位；后端
+`RemoveAccount` / `DisableAccount` 对它们硬拒（`internal/app/app.go` 明确写了「需求约束」）。
+删掉等于让整条渠道瘫痪。所以容器层只做两件事：**解释清楚** + **首次启动默认收起**，
+不要试图调 API 去删。上游自己也有「不适用 / 展开」开关，用户想看随时能展开。
+
+### 主题色铁律（顶部黑边的根因）
+
+上游面板是**浅色**主题（`style.css: --bg: #f5f6f8`）。容器/状态栏必须与它同色：
+
+- iOS：`panelBackground`、`UIStatusBarStyleDarkContent`、`.preferredColorScheme(.light)`
+- Android：`PANEL_BG` + `SYSTEM_UI_FLAG_LIGHT_STATUS_BAR`
+- WebView：`isOpaque = true`，背景色同为 `#f5f6f8`
+
+早期版本容器用了 `#0A0D12` 深色底，状态栏安全区露出深色，用户看到的就是「上方信号/电池那一块是黑的」。
+**外壳版仓库（`wild-work-mobile`）正好相反**：`mobile-ui` 是深色 `#0a0d12`，容器也保持深色 +
+`UIStatusBarStyleLightContent`，别把两边的主题色串了。外壳版 UI 自带
+`viewport-fit=cover` 与 `--safe-top/--safe-bottom`，只要 WebView `.ignoresSafeArea(.all)` 即可。
+
+### 下拉刷新与卡顿
+
+| 平台 | 实现 | 为什么 |
+|------|------|--------|
+| iOS | `WKWebView.scrollView.refreshControl = UIRefreshControl()` | 原生手势，不与 rubber-band 冲突；`bounces` 必须为 `true` |
+| Android | 自写 `PullToRefreshLayout`（两个仓库各一份） | 项目刻意零第三方依赖，没有 AndroidX 的 `SwipeRefreshLayout` |
+
+性能上必须保持的两条：
+
+- **缓存模式只能是 `LOAD_DEFAULT`**。早期用 `LOAD_NO_CACHE`，每次刷新都重新下载并重新解析
+  上游 5000 行 `app.js`，这是手机上最明显的卡顿源。数据接口仍实时请求，不受影响。
+- **`isOpaque = true`**。透明 WKWebView 每帧都要做合成混合，滚动时掉帧明显。
+
+上游自身的常驻轮询（`loadStats` 30s / `loadAppLog` 15s / 每秒重算进行中耗时）是上游决定的，
+容器层不改、也不该改。如果将来真要动，给上游提 PR，别在这里加定时器。
+
+---
+
 ## 5. 故障排查
 
 | 现象 | 原因 | 处理 |
@@ -203,6 +273,11 @@ CI 在打包后强制执行 `scripts/verify_ipa.py`，任一项不过就红：
 | CI 报 `缺少 systrayfix 目录` | 上游已把 energye/systray 修好，删掉了补丁目录 | 脚本会自动清掉 go.mod 里指向它的 `replace` 行，正常现象 |
 | `prefersHomeIndicatorAutoHidden` 编译错误 | 它是 UIViewController 的属性，不是 SwiftUI View 的修饰符 | 已从 `WildWorkNativeApp.swift` 移除 |
 | CI 里 iOS job `cancelled` 且无 runner | runner 标签不可用 / 私有仓库未绑支付方式 | 只用 `macos-latest`；Free 账号的私有仓库跑 macOS runner 需要已验证的付款方式 |
+| 顶部状态栏区域一条黑边 | 容器深色底 vs 面板浅色 / WebView 未 `ignoresSafeArea(.all)` | 见「容器注入层 → 主题色铁律」；两端背景色、状态栏样式一起改 |
+| 出现两个删不掉的虚拟账号 | oczen / kilo 免密免费渠道的内建占位 | 不是 bug，别删；靠常驻说明 + 首启收起处理，见「容器注入层」 |
+| 下拉刷新没反应 | `bounces=false`（iOS）/ 外层容器未 attach WebView（Android） | 检查 `scrollView.refreshControl` 与 `PullToRefreshLayout.attach()` |
+| 页面滚动/刷新卡顿 | `LOAD_NO_CACHE` 或 `isOpaque=false` | 改回 `LOAD_DEFAULT` / `true`，见「容器注入层」 |
+| footer 仍显示「右键托盘图标退出」 | 注入脚本没跑到（页面结构变了 / 只改了一端） | 跑 `check_panel_tweaks.py`；在 App 内下拉刷新后看 `.footer` 文本 |
 
 ---
 
@@ -214,9 +289,12 @@ CI 在打包后强制执行 `scripts/verify_ipa.py`，任一项不过就红：
 4. **不要给 `xcodebuild` 接管道**。`cmd | tail` 会把失败退出码换成 `tail` 的 0，构建失败也照样出包。
 5. **不要提交二进制到仓库**。`libgateway.so` / `libwildwork.a` 已在 `.gitignore`，由 CI 构建注入。
 6. **不要在 App 里硬编码端口**。三处常量必须同步改。
-7. **不要给面板做二次 UI 覆盖**。要改体验就推动上游，否则每次上游改版都要重新适配。
+7. **不要重写面板 UI / fork 前端**。轻量适配只能走「容器注入层」的运行时注入；一旦复制一份 HTML/CSS 自己维护，上游每次改版都要重放补丁。
 8. **不要把监听地址改成 `0.0.0.0` 而不设密码**。上游会直接拒绝启动。
 9. **不要删掉 CI 里的 `verify_ipa.py`**。它是唯一能挡住「装不上的 IPA」的关卡。
+10. **不要只改一侧的注入脚本**。iOS / Android 两份必须同步，`check_panel_tweaks.py` 会挡住不同步的提交。
+11. **不要把 `LOAD_DEFAULT` 改回 `LOAD_NO_CACHE`**，也不要把 `isOpaque` 改回 `false`：两者都是实测过的卡顿源。
+12. **不要试图删除 oczen / kilo 虚拟账号**，后端硬拒；见「容器注入层」一节。
 
 ---
 
@@ -233,4 +311,8 @@ CI 在打包后强制执行 `scripts/verify_ipa.py`，任一项不过就红：
 | iOS Bundle ID | `com.wildwork.nativeapp` | `ios/project.yml` |
 | 数据目录（Android） | `filesDir/ww` | `GatewayService` |
 | 数据目录（iOS） | `Documents/wildwork` | `Gateway.swift` |
+| 面板主题色 | `#f5f6f8`（浅色） | 上游 `web/style.css`；容器须同色 |
+| 注入脚本（两份） | `PanelTweaks.script` / `PanelTweaks.SCRIPT` | `RootView.swift` / `PanelTweaks.java` |
+| 虚拟账号收起开关 | `acct-show-na`（上游）/ `ww-mobile-booted`（本仓） | 注入脚本 |
+| 一致性校验 | `scripts/check_panel_tweaks.py` | 两个 workflow 的第一步 |
 | 上游仓库 | `rockswang/wild-work@master` | workflows 的 `env` |

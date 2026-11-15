@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -21,16 +22,21 @@ import android.widget.ProgressBar;
 import android.widget.TextView;
 
 /**
- * 纯移动端：网关跑在本进程内（Go 二进制作为子进程），
+ * 纯移动端：网关跑在本进程内（Android 侧为子进程，iOS 侧为静态库），
  * App 只是它的窗口。功能与原版桌面程序完全一致，因为就是同一份服务端代码。
  *
  * 界面刻意做成「启动页 → 面板」两步：
  *   启动页显示网关引导日志，能让用户看到「正在启动服务」而不是干等白屏。
+ *
+ * 面板是上游的浅色主题（#f5f6f8），容器/状态栏必须同色，否则顶部会露出深色块。
  */
 public class MainActivity extends Activity implements GatewayService.Listener {
 
+    private static final int PANEL_BG = Color.parseColor("#F5F6F8");
+
     private GatewayService gateway;
     private WebView webView;
+    private PullToRefreshLayout pull;
     private FrameLayout root;
 
     // 启动页控件
@@ -46,6 +52,13 @@ public class MainActivity extends Activity implements GatewayService.Listener {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // 浅色面板 → 浅色状态栏 + 深色状态栏图标
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            getWindow().setStatusBarColor(PANEL_BG);
+            View decor = getWindow().getDecorView();
+            decor.setSystemUiVisibility(decor.getSystemUiVisibility()
+                    | View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
+        }
         gateway = new GatewayService(this);
         buildUi();
         boot();
@@ -53,7 +66,7 @@ public class MainActivity extends Activity implements GatewayService.Listener {
 
     private void buildUi() {
         root = new FrameLayout(this);
-        root.setBackgroundColor(Color.parseColor("#0A0D12"));
+        root.setBackgroundColor(PANEL_BG);
 
         webView = new WebView(this);
         WebSettings s = webView.getSettings();
@@ -65,10 +78,11 @@ public class MainActivity extends Activity implements GatewayService.Listener {
         s.setSupportZoom(false);
         s.setBuiltInZoomControls(false);
         s.setDisplayZoomControls(false);
-        s.setCacheMode(WebSettings.LOAD_NO_CACHE);
+        // LOAD_NO_CACHE 会让每次刷新重新下载并重新解析上游 5000 行 app.js —— 手机上的主要卡顿源。
+        // 面板走 127.0.0.1，静态资源交给 WebView 正常缓存即可；数据接口永远实时请求。
+        s.setCacheMode(WebSettings.LOAD_DEFAULT);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-        webView.setBackgroundColor(Color.parseColor("#0A0D12"));
-        // 面板自带的 UI 会自己处理导航；非本机链接交给系统浏览器
+        webView.setBackgroundColor(PANEL_BG);
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, String url) {
@@ -84,10 +98,24 @@ public class MainActivity extends Activity implements GatewayService.Listener {
                     return false;
                 }
             }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                // 上游面板是 SPA；onPageFinished 时 DOM 已就绪，注入一次即可。
+                // 内容与 iOS PanelTweaks.script 一致，见 PanelTweaks.java。
+                view.evaluateJavascript(PanelTweaks.SCRIPT, null);
+                pull.setRefreshing(false);
+            }
         });
         webView.setWebChromeClient(new WebChromeClient());
         webView.setVisibility(View.GONE);
-        root.addView(webView, new FrameLayout.LayoutParams(
+
+        pull = new PullToRefreshLayout(this);
+        pull.attach(webView);
+        pull.setOnRefreshListener(() -> ui.post(() -> {
+            if (!stopped) webView.reload();
+        }));
+        root.addView(pull, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         bootView = new LinearLayout(this);
@@ -104,7 +132,6 @@ public class MainActivity extends Activity implements GatewayService.Listener {
         GradientDrawable logoBg = new GradientDrawable();
         logoBg.setShape(GradientDrawable.RECTANGLE);
         logoBg.setCornerRadius(dp(20));
-        // setColors(int[]) 是 API 16+ 的重载；带 positions 的重载需要 ColorStateList，此处用简单双色渐变即可
         logoBg.setColors(new int[]{Color.parseColor("#4F8DFD"), Color.parseColor("#7C6CFF")});
         logoBg.setOrientation(GradientDrawable.Orientation.TL_BR);
         logo.setBackground(logoBg);
@@ -115,7 +142,7 @@ public class MainActivity extends Activity implements GatewayService.Listener {
         TextView title = new TextView(this);
         title.setText("WildWork");
         title.setTextSize(21);
-        title.setTextColor(Color.WHITE);
+        title.setTextColor(Color.parseColor("#1F2329"));
         title.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -125,7 +152,7 @@ public class MainActivity extends Activity implements GatewayService.Listener {
         bootStatus = new TextView(this);
         bootStatus.setText("正在启动本地服务…");
         bootStatus.setTextSize(13);
-        bootStatus.setTextColor(Color.parseColor("#94A2B8"));
+        bootStatus.setTextColor(Color.parseColor("#5A6472"));
         bootStatus.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -139,7 +166,7 @@ public class MainActivity extends Activity implements GatewayService.Listener {
 
         bootLog = new TextView(this);
         bootLog.setTextSize(10);
-        bootLog.setTextColor(Color.parseColor("#4A5568"));
+        bootLog.setTextColor(Color.parseColor("#6B7280"));
         bootLog.setTypeface(android.graphics.Typeface.MONOSPACE);
         bootLog.setMaxLines(6);
         bootLog.setGravity(Gravity.CENTER);
@@ -171,7 +198,7 @@ public class MainActivity extends Activity implements GatewayService.Listener {
         bootView.setVisibility(View.VISIBLE);
         webView.setVisibility(View.GONE);
         bootStatus.setText("正在启动本地服务…");
-        bootStatus.setTextColor(Color.parseColor("#94A2B8"));
+        bootStatus.setTextColor(Color.parseColor("#5A6472"));
         bootSpinner.setVisibility(View.VISIBLE);
 
         new Thread(() -> {
@@ -212,7 +239,7 @@ public class MainActivity extends Activity implements GatewayService.Listener {
     private void showBootError(String detail) {
         bootSpinner.setVisibility(View.GONE);
         bootStatus.setText("启动失败");
-        bootStatus.setTextColor(Color.parseColor("#F87171"));
+        bootStatus.setTextColor(Color.parseColor("#DC2626"));
         bootLog.setText(detail == null ? "" : detail);
         bootRetry.setVisibility(View.VISIBLE);
     }
@@ -263,7 +290,7 @@ public class MainActivity extends Activity implements GatewayService.Listener {
         if (gateway != null) gateway.stop();
         if (webView != null) {
             try {
-                root.removeView(webView);
+                if (pull != null) pull.removeView(webView);
                 webView.destroy();
             } catch (Exception ignored) {}
         }

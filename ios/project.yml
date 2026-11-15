@@ -29,7 +29,8 @@ targets:
         UIRequiresFullScreen: true
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
-        UIStatusBarStyle: UIStatusBarStyleLightContent
+        # 面板是浅色主题，状态栏文字必须用深色，否则浅底白字看不清
+        UIStatusBarStyle: UIStatusBarStyleDarkContent
         UIViewControllerBasedStatusBarAppearance: false
         # 网关只监听 127.0.0.1，但仍需允许明文 HTTP
         NSAppTransportSecurity:
