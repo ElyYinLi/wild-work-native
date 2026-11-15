@@ -231,7 +231,9 @@ CI 在打包后强制执行 `scripts/verify_ipa.py`，任一项不过就红：
 上游面板是**浅色**主题（`style.css: --bg: #f5f6f8`）。容器/状态栏必须与它同色：
 
 - iOS：`panelBackground`、`UIStatusBarStyleDarkContent`、`.preferredColorScheme(.light)`
-- Android：`PANEL_BG` + `SYSTEM_UI_FLAG_LIGHT_STATUS_BAR`
+- Android：`PANEL_BG` + `SYSTEM_UI_FLAG_LIGHT_STATUS_BAR`，且 `res/values/themes.xml`
+  必须是**浅色**（`windowBackground` / `navigationBarColor` / `windowLightStatusBar`）。
+  只改代码不改主题资源的话，启动会闪一下黑屏、底部导航栏仍是黑的、Button 文字是白的。
 - WebView：`isOpaque = true`，背景色同为 `#f5f6f8`
 
 早期版本容器用了 `#0A0D12` 深色底，状态栏安全区露出深色，用户看到的就是「上方信号/电池那一块是黑的」。

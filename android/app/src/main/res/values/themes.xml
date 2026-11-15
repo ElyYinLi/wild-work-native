@@ -1,11 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="AppTheme" parent="@android:style/Theme.Material.NoActionBar">
-        <item name="android:statusBarColor">#0A0D12</item>
-        <item name="android:navigationBarColor">#0A0D12</item>
-        <item name="android:windowBackground">#0A0D12</item>
-        <item name="android:windowLightStatusBar">false</item>
-        <item name="android:windowLightNavigationBar">false</item>
+    <!-- 上游面板是浅色主题（#f5f6f8）；窗口背景 / 系统栏 / 控件文字必须一起用浅色，
+         否则状态栏与底部导航栏会露出深色块，启动时还会闪一下黑屏。
+         MainActivity 另设了 statusBarColor + LIGHT_STATUS_BAR，这里保持一致。 -->
+    <style name="AppTheme" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">#F5F6F8</item>
+        <item name="android:navigationBarColor">#F5F6F8</item>
+        <item name="android:windowBackground">#F5F6F8</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
         <item name="android:colorAccent">#4F8DFD</item>
     </style>
 </resources>
