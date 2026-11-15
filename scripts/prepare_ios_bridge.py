@@ -218,7 +218,20 @@ def main() -> None:
         f.unlink()
     (tray_dir / "systray_stub.go").write_text(SYSTRAY_STUB, encoding="utf-8")
 
-    # 4) 校验：确保必需的导出符号与目录都在
+    # 4) go.mod 里的 systrayfix replace 兜底
+    # 上游曾在 go.mod 用 `replace github.com/energye/systray => ./systrayfix` 打补丁，
+    # 后来修好就删掉了。两种形态都要能编：
+    #   - 目录在 → 原样保留（Go 需要它）；
+    #   - 目录没了但 replace 还指着它 → 删掉该行。反正我们的 stub 已经把
+    #     energye/systray 的引用全部摘掉，replace 指向不存在的目录只会让 go 报错。
+    go_mod = work / "go.mod"
+    gomod_text = go_mod.read_text(encoding="utf-8")
+    if "./systrayfix" in gomod_text and not (work / "systrayfix").is_dir():
+        kept = [ln for ln in gomod_text.splitlines() if "./systrayfix" not in ln]
+        go_mod.write_text("\n".join(kept) + "\n", encoding="utf-8")
+        print("[prepare-ios-bridge] 上游已移除 systrayfix，清理 go.mod 里失效的 replace")
+
+    # 5) 校验：确保必需的导出符号与目录都在
     checks = {
         "cmd/wild-work/zz_ios_bridge.go": "WildWorkStart",
         "internal/systray/systray_stub.go": "func Quit",
@@ -226,8 +239,6 @@ def main() -> None:
     for rel, needle in checks.items():
         if needle not in (work / rel).read_text(encoding="utf-8"):
             fail(f"{rel} 校验失败（缺少 {needle}）")
-    if not (work / "systrayfix").is_dir():
-        fail("缺少 systrayfix 目录：go.mod 里的 replace 会失效（上游删了该补丁目录？）")
 
     print(f"[prepare-ios-bridge] OK -> {work}")
 
