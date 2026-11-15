@@ -34,6 +34,17 @@ jobs:
           mkdir -p upstream
           tar xzf up.tgz -C upstream --strip-components=1
 
+      - name: Resolve upstream version
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/resolve_upstream_version.py --github-env
+
+      - name: Apply upstream version to Xcode spec
+        run: |
+          python3 scripts/set_ios_version.py \
+            --version "${{ env.WW_VERSION }}" \
+            --code "${{ env.WW_VERSION_CODE }}"
+
       # ------------------------------------------------------------------
       # Go 网关 -> 静态库（c-archive）
       #
@@ -135,6 +146,7 @@ jobs:
           tag_name: ios-latest
           name: iOS 最新构建（未签名）
           body: |
+            对应上游版本：`${{ env.WW_VERSION }}`
             构建提交：`${{ github.sha }}`
 
             单文件 IPA：Go 网关已静态链接进主可执行文件，**不需要电脑、不需要局域网服务端**，

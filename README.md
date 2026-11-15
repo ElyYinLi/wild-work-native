@@ -1,91 +1,116 @@
-# wild-work-native
+# WildWork Native
 
-[`rockswang/wild-work`](https://github.com/rockswang/wild-work) 的**纯移动端版本**：网关直接打包进 App，
-装上就能用——不需要电脑、不需要 Docker、不需要外接服务。
+将 [rockswang/wild-work](https://github.com/rockswang/wild-work) 的 Go 网关封装为可在移动设备本地运行的 Android / iOS 应用。
 
-与「外壳版」的区别：
+> **非官方第三方项目** · 仅供个人学习与研究 · 不提供技术支持
+> 使用本项目即表示您已阅读并同意文末的[许可与使用条款](#许可与使用条款)及[免责声明](#免责声明)。
 
-| | 外壳版（wild-work-mobile） | 本仓库（纯移动端） |
-|---|---|---|
-| 运行方式 | App 连接电脑上的 wild-work | 网关跑在手机里 |
-| 需要电脑 | 需要，且电脑要一直开着 | **不需要** |
-| 功能 | 自研的简化移动 UI | 与原版完全一致（同一份服务端代码） |
-| 包体积 | ~70 KB | ~15–20 MB（内置网关） |
+| | |
+|---|---|
+| 平台 | Android / iOS（iPhone） |
+| 状态 | 维护中 |
+| 上游 | `rockswang/wild-work@master`（构建时滚动拉取） |
+| 许可 | 本仓库原创代码：非商业研究用途；上游代码：MIT |
 
-## 实现原理
+## 目录
 
-```
-┌────────────────────────────────────────────────┐
-│ 手机 App（本仓库）                              │
-│                                                │
-│  ┌────────────────┐   127.0.0.1:7863           │
-│  │ WebView        │ ──────────────┐            │
-│  │  原版面板 UI   │               ▼            │
-│  └────────────────┘      ┌────────────────────┐ │
-│                          │ Go 网关（上游原样） │ │
-│                          │ 数据落在沙盒私有目录 │ │
-│                          └────────────────────┘ │
-└────────────────────────────────────────────────┘
-```
+- [项目来源](#项目来源)
+- [功能](#功能)
+- [适用版本与运行环境](#适用版本与运行环境)
+- [安装与使用](#安装与使用)
+- [构建](#构建)
+- [许可与使用条款](#许可与使用条款)
+- [免责声明](#免责声明)
+- [致谢](#致谢)
 
-- 网关就是上游 `cmd/wild-work` 编译出的 arm64 代码，**源码与上游完全一致**，
-  所以 22 个渠道、签到、积分、三种协议接口全部原样可用。
-- **Android**：编成 `jniLibs/arm64-v8a/libgateway.so` 由系统解压并赋予执行权限，
-  再以子进程拉起（`--no-tray`）。
-- **iOS**：编成静态库 `libwildwork.a`（`-buildmode=c-archive`）直接链进主可执行文件，
-  Swift 调 `WildWorkStart()` 在进程内启动。**没有子进程**——iOS 不允许 exec 未签名二进制，
-  这是唯一能过 LiveContainer / SideStore 重签的方案。
-- 数据目录通过 `WILDWORK_HOME` 指到 App 私有目录，`config.json` / `auths/` / `data/` 都不会丢。
-- 网关只监听 `127.0.0.1`，不对局域网暴露面板。
+## 项目来源
 
-## 下载
+上游项目 [rockswang/wild-work](https://github.com/rockswang/wild-work) 是一个以 Go 编写、带浏览器管理面板的桌面程序，其官方发布仅覆盖 Windows / macOS / Linux。本仓库在其基础上提供移动端封装，使网关能够在移动设备本机运行。
 
-[Releases](https://github.com/ElyYinLi/wild-work-native/releases)
+本仓库**不包含上游源码副本**：构建时临时拉取上游 `master` 分支源码进行编译，仓库内仅含容器代码、界面适配与构建脚本。上游代码的版权归其原作者所有。
 
-| 平台 | 文件 | 说明 |
-|------|------|------|
-| Android | `WildWorkNative.apk` | 需 arm64-v8a（现代手机基本都是） |
-| iOS | `WildWorkNative.ipa` | 未签名，LiveContainer / SideStore / TrollStore 直接导入，或自签 |
+本项目为独立的第三方适配，未经上游作者授权或背书，与上游项目无隶属、合作或关联关系。
 
-两个平台都已实测内嵌网关，装上即可用，无需任何外部服务。
+## 功能
 
-> iOS 包每次发布前都会跑 `scripts/verify_ipa.py`：校验 `Info.plist` 关键键、arm64 Mach-O、
-> Go 符号是否真的链进来、桌面图标资源是否齐全。任何一项不过，构建直接失败——不会产出
-> 「装上去才知道是坏包」的产物。
+- 在设备本机运行上游网关，管理面板功能与上游一致
+- 面板通过回环地址 `127.0.0.1:7863` 访问，配置与数据保存在应用私有目录
+- 网关默认仅监听回环地址，不主动向局域网暴露管理面板
+- 提供 Android APK 与未签名 iOS IPA 两种构建产物
 
-### 首次使用
+## 适用版本与运行环境
 
-1. 打开 App，等待启动页显示「就绪」（首次约 1–3 秒，只是解压与启动网关）
-2. 进入面板 → 点渠道按钮（如 `+ WorkBuddyCN`）添加账号
-3. 到「设置」里把监听地址改成 `0.0.0.0` 并**设置管理密码**——这样局域网里的其它设备
-   （电脑上的 Claude Code、Cherry Studio 等）也能用手机上的 API
-4. 面板顶栏会显示 API 地址与 Key，填到客户端即可
+| 项目 | 范围 |
+|---|---|
+| Android | Android 8.0（API 24）及以上，仅 `arm64-v8a`；不支持 32 位设备与模拟器 |
+| iOS | iOS 15.0 及以上，iPhone（arm64）；不支持 iPad |
+| iOS 安装方式 | IPA 未签名，需使用自有证书签名或第三方侧载工具导入；本仓库不提供签名、证书或分发服务 |
+| 上游版本 | 取自构建时的 `master` 快照，**不锁定版本号**，不保证与任意历史或未来版本兼容 |
+| 外部依赖 | 无。网关内置于应用，运行时不需要电脑、局域网服务端或外部账号 |
+| 验证范围 | 已完成安装包结构与完整性校验；未进行真机长期稳定性、性能及安全审计 |
+| 版本号 | 构建产物版本取自上游最新 tag（如 `2.11.7`），便于识别对应上游版本；网关源码取自构建时的 `master` 快照，可能略新于该 tag |
+
+> 上游接口或服务条款变更可能导致功能失效。本项目不承诺对上游变更提供适配。
+
+## 安装与使用
+
+从 [Releases](https://github.com/ElyYinLi/wild-work-native/releases) 获取对应平台的安装包（`android-latest` / `ios-latest` 为滚动更新标签）。
+
+1. **Android**：安装 APK，需在系统设置中允许安装未知来源应用。
+2. **iOS**：IPA 未签名，需自行签名或通过侧载工具导入。免费开发者证书存在有效期限制，需自行续签。
+3. 首次启动后等待网关就绪，在管理面板中添加渠道账号。
+4. 若需从局域网内其他设备访问 API，请在面板设置中调整监听地址并设置管理密码；开放监听前请自行评估网络暴露风险。
+
+构建命令与维护说明见 [`docs/MAINTENANCE.md`](docs/MAINTENANCE.md)。
 
 ## 构建
 
-推送到 `main` 自动构建。Android 每天 03:00 UTC 还会自动跟一次上游，保证网关是最新版。
+构建由 GitHub Actions 完成：Android 使用 `ubuntu-latest`，iOS 使用 `macos-latest`。推送至 `main` 触发构建，Android 另设每日定时任务跟随上游重建。本地构建需要 Go 1.25、JDK 17、Gradle 8.7；iOS 另需 macOS 与 Xcode 16。完整步骤见维护文档。
 
-```bash
-# 本地构建 Android（需 Go 1.25+ 与 Android SDK）
-curl -fsSL https://codeload.github.com/rockswang/wild-work/tar.gz/refs/heads/master | tar xz
-cd wild-work-master && GOOS=android GOARCH=arm64 CGO_ENABLED=0 \
-  go build -trimpath -ldflags "-s -w" \
-  -o ../android/app/src/main/jniLibs/arm64-v8a/libgateway.so ./cmd/wild-work
-cd .. && cd android && gradle assembleRelease
+---
 
-# iOS 只能在 macOS 上构建（需 Xcode 15+ 与 xcodegen）
-python3 scripts/prepare_ios_bridge.py /path/to/upstream bridge
-SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-(cd bridge && CGO_ENABLED=1 GOOS=ios GOARCH=arm64 \
-  CC="$(xcrun --sdk iphoneos --find clang)" \
-  CGO_CFLAGS="-isysroot $SDK -miphoneos-version-min=15.0" \
-  CGO_LDFLAGS="-isysroot $SDK -miphoneos-version-min=15.0" \
-  go build -buildmode=c-archive -trimpath -ldflags "-s -w" \
-  -o ../ios/WildWorkNative/Resources/libwildwork.a ./cmd/wild-work)
-cd ios && xcodegen generate && xcodebuild -project WildWorkNative.xcodeproj \
-  -scheme WildWorkNative -configuration Release -sdk iphoneos \
-  -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
-# 打包成 IPA 与产物校验的完整命令见 .github/workflows/ios.yml 最后两步
-```
+## 许可与使用条款
 
-维护说明见 [`docs/MAINTENANCE.md`](docs/MAINTENANCE.md)。
+本仓库根目录另附 [LICENSE](LICENSE)，内容与本章节一致。
+
+### 1. 权利归属与许可范围
+
+- 上游项目 `rockswang/wild-work` 采用 **MIT License**，版权归其原作者所有。本仓库不拥有上游代码的权利，也**不对其重新授权**；使用、修改或分发上游代码须遵守其 MIT 条款，包括保留版权与许可声明。
+- 本仓库**自行编写**的容器代码、界面适配与构建脚本，适用下述**非商业研究用途许可**：仅授予个人为学习、研究与技术交流目的，阅读、运行及修改本仓库原创部分的、非独占、不可转让、不可再授权的使用许可。
+- 本声明**仅约束本仓库原创部分**，不减损您依据 MIT 许可就上游代码享有的权利。两者就上游代码发生冲突时，以上游 MIT 许可为准。
+
+> 说明：上述许可并非 OSI 认证的开源许可证。若您需要将本项目用于商业或再分发场景，请自行取得相应授权。
+
+### 2. 允许的使用
+
+个人本地学习与研究、阅读源码、在自有设备上评估功能、非公开的技术交流。
+
+### 3. 禁止的使用
+
+严禁将本项目或其构建产物用于以下任一目的：
+
+1. 任何商业或营利性用途，包括但不限于收费代运行、代签到、代刷、转售、二次分发牟利、对外提供服务，或集成进收费产品；
+2. 生产环境、关键业务系统，或任何对外提供服务的场景；
+3. 批量注册或滥用第三方平台账号，绕过认证、计费、配额或风控机制，刷量、爬取，或干扰上游及第三方平台的正常运行；
+4. 违反第三方平台服务条款、侵犯他人合法权益的行为；
+5. 任何违反适用法律法规的行为，包括但不限于网络安全、数据安全、个人信息保护、著作权及计算机信息系统安全相关规定；
+6. 删除或篡改版权声明、许可声明或本声明，冒称本项目的官方版本，或声称与上游作者存在授权、合作、背书关系；
+7. 规避上游项目或其依赖服务的授权与使用限制。
+
+### 4. 留存期限与删除义务
+
+本项目及其安装包以**临时性学习与研究评估**为目的提供。若您不同意本声明、不具备合法使用前提，或将本项目用于上述任何被禁止的用途，请立即停止使用，并在获取后 **24 小时内**删除所持有的全部源码、安装包、构建产物及派生副本。
+
+---
+
+## 免责声明
+
+本项目按「现状」（**AS IS**）提供，不附带任何明示或默示担保，包括但不限于适销性、特定用途适用性、不侵权、可用性、稳定性与安全性。
+
+作者及贡献者不对因使用或无法使用本项目而产生的任何直接、间接、附带、特殊或后果性损害承担责任，亦不对账号状态、数据丢失、上游服务变更、接口失效或第三方平台处置结果负责。
+
+使用者应自行判断并确保其使用行为符合所在司法辖区的法律法规、上游项目许可及所涉第三方平台的服务条款，并**自行承担全部风险与合规义务**。本项目为个人研究性质，不提供技术支持、商业支持、安全更新承诺或兼容性保证。
+
+## 致谢
+
+感谢 [rockswang/wild-work](https://github.com/rockswang/wild-work) 原作者的工作。本项目仅提供移动端封装，未获其授权或背书。

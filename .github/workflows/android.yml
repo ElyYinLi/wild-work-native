@@ -39,14 +39,11 @@ jobs:
           echo "UPSTREAM_SHA=$(git -C upstream rev-parse HEAD 2>/dev/null || echo unknown)"
 
       - name: Resolve upstream version
-        id: ver
-        run: |
-          V=$(cat upstream/internal/*/version.go 2>/dev/null | grep -oE '"[0-9]+\.[0-9]+\.[0-9]+"' | head -1 | tr -d '"')
-          if [ -z "$V" ]; then
-            V=$(curl -fsSL "https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest" | grep -m1 '"tag_name"' | sed -E 's/.*"v?([^"]+)".*/\1/')
-          fi
-          echo "version=${V:-unknown}" >> $GITHUB_OUTPUT
-          echo "网关版本: ${V:-unknown}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # 上游无 Releases、源码内也无 version.go，改为从最新 tag 解析（v2.11.7 -> 2.11.7）。
+        # 结果写入 $GITHUB_ENV，供后续 gradle 与 release body 使用。
+        run: python3 scripts/resolve_upstream_version.py --github-env
 
       - name: Build gateway (android/arm64, static)
         working-directory: upstream
@@ -90,7 +87,9 @@ jobs:
       - name: Build release APK
         run: |
           gradle -p android assembleRelease --no-daemon --stacktrace \
-            -PgatewayVersion="${{ steps.ver.outputs.version }}"
+            -PgatewayVersion="${{ env.WW_VERSION }}" \
+            -PupstreamVersion="${{ env.WW_VERSION }}" \
+            -PversionCode="${{ env.WW_VERSION_CODE }}"
 
       - name: Collect artifact
         run: |
@@ -112,7 +111,7 @@ jobs:
           tag_name: android-latest
           name: Android 最新构建（纯移动端）
           body: |
-            网关版本：`${{ steps.ver.outputs.version }}`（上游 ${{ env.UPSTREAM_REPO }}@${{ env.UPSTREAM_REF }}）
+            网关版本：`${{ env.WW_VERSION }}`（与上游最新 tag 对应；源码取自 ${{ env.UPSTREAM_REPO }}@${{ env.UPSTREAM_REF }} 快照）
             构建提交：`${{ github.sha }}`
 
             网关已内置，安装后直接可用，**不需要电脑**。

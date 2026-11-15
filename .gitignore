@@ -17,3 +17,7 @@ DerivedData/
 
 .DS_Store
 *.log
+
+# Python 脚本缓存（本地校验时产生，不入库）
+__pycache__/
+*.pyc

@@ -10,8 +10,10 @@ android {
         applicationId = "com.wildwork.nativeapp"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        // 版本号由 CI 从上游最新 tag 注入（-PupstreamVersion / -PversionCode），
+        // 本地未传参数时退回中性默认值。
+        versionCode = project.findProperty("versionCode")?.toString()?.toIntOrNull() ?: 1
+        versionName = project.findProperty("upstreamVersion")?.toString() ?: "0.0.0"
     }
 
     buildTypes {

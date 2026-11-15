@@ -318,3 +318,23 @@ CI 在打包后强制执行 `scripts/verify_ipa.py`，任一项不过就红：
 | 虚拟账号收起开关 | `acct-show-na`（上游）/ `ww-mobile-booted`（本仓） | 注入脚本 |
 | 一致性校验 | `scripts/check_panel_tweaks.py` | 两个 workflow 的第一步 |
 | 上游仓库 | `rockswang/wild-work@master` | workflows 的 `env` |
+| App 版本号 | 上游最新 tag，如 `2.11.7` | `resolve_upstream_version.py` → `$GITHUB_ENV` 的 `WW_VERSION` |
+| Android versionCode | `major*10000+minor*100+patch`，如 `21107` | 同上 `WW_VERSION_CODE` → `-PversionCode` |
+| iOS 版本字段 | `CFBundleShortVersionString` / `MARKETING_VERSION` / `CFBundleVersion` / `CURRENT_PROJECT_VERSION` | `set_ios_version.py` 在 `xcodegen generate` 前注入 `project.yml` |
+| 许可 | 非商业研究用途，条款见根目录 `LICENSE` | README「许可与使用条款」 |
+
+## 8. 版本号规则
+
+上游**没有 GitHub Releases，源码里也没有 `version.go`**——旧的解析逻辑一直输出 `unknown`。
+现在统一由 `scripts/resolve_upstream_version.py` 取 tags 中的最大版本号（带 `GITHUB_TOKEN`
+走 API，备用 `git ls-remote --tags`），写入 `$GITHUB_ENV`：
+
+- `WW_VERSION`：清洗后的 `x.y.z`，作为 Android `versionName` 与 iOS `CFBundleShortVersionString`；
+- `WW_VERSION_CODE`：数字化整数，作为 Android `versionCode` 与 iOS `CFBundleVersion`。
+
+Android 侧经 `-PupstreamVersion` / `-PversionCode` 注入 gradle（`-PgatewayVersion` 仍用于
+`BuildConfig.GATEWAY_VERSION`）；iOS 侧由 `scripts/set_ios_version.py` 在 `xcodegen` 之前改写
+`project.yml`，四个版本字段必须同时改，否则 Xcode 里显示的版本与 App 里读到的不一致。
+两个通道都失败时回落到脚本内的 `FALLBACK_VERSION` 并打印 `::warning::`，不阻断构建。
+
+> 版本号标识的是**构建时上游最新 tag**；网关源码取自 `master` 快照，可能略新于该 tag。
