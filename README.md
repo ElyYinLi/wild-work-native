@@ -15,25 +15,26 @@
 ## 实现原理
 
 ```
-┌──────────────────────────────────────────────┐
-│ 手机 App（本仓库）                            │
-│                                              │
-│  ┌────────────────┐   127.0.0.1:7863         │
-│  │ WebView        │ ──────────────┐          │
-│  │  原版面板 UI   │               │          │
-│  └────────────────┘               ▼          │
-│                        ┌───────────────────┐ │
-│                        │ Go 网关子进程      │ │
-│                        │ (上游二进制)       │ │
-│                        │ 数据落在沙盒私有目录 │ │
-│                        └───────────────────┘ │
-└──────────────────────────────────────────────┘
+┌────────────────────────────────────────────────┐
+│ 手机 App（本仓库）                              │
+│                                                │
+│  ┌────────────────┐   127.0.0.1:7863           │
+│  │ WebView        │ ──────────────┐            │
+│  │  原版面板 UI   │               ▼            │
+│  └────────────────┘      ┌────────────────────┐ │
+│                          │ Go 网关（上游原样） │ │
+│                          │ 数据落在沙盒私有目录 │ │
+│                          └────────────────────┘ │
+└────────────────────────────────────────────────┘
 ```
 
-- 网关就是上游 `cmd/wild-work` 交叉编译出的 arm64 二进制，**源码与上游完全一致**，
+- 网关就是上游 `cmd/wild-work` 编译出的 arm64 代码，**源码与上游完全一致**，
   所以 22 个渠道、签到、积分、三种协议接口全部原样可用。
-- 打包为 `jniLibs/arm64-v8a/libgateway.so`：Android 只会解压 native 库并赋予可执行权限，
-  这是让 Go 二进制在 App 内可执行最稳的方式（放 assets 里没有执行位）。
+- **Android**：编成 `jniLibs/arm64-v8a/libgateway.so` 由系统解压并赋予执行权限，
+  再以子进程拉起（`--no-tray`）。
+- **iOS**：编成静态库 `libwildwork.a`（`-buildmode=c-archive`）直接链进主可执行文件，
+  Swift 调 `WildWorkStart()` 在进程内启动。**没有子进程**——iOS 不允许 exec 未签名二进制，
+  这是唯一能过 LiveContainer / SideStore 重签的方案。
 - 数据目录通过 `WILDWORK_HOME` 指到 App 私有目录，`config.json` / `auths/` / `data/` 都不会丢。
 - 网关只监听 `127.0.0.1`，不对局域网暴露面板。
 
@@ -44,9 +45,13 @@
 | 平台 | 文件 | 说明 |
 |------|------|------|
 | Android | `WildWorkNative.apk` | 需 arm64-v8a（现代手机基本都是） |
-| iOS | `WildWorkNative.ipa` | 未签名，需自签（SideStore / Sideloadly） |
+| iOS | `WildWorkNative.ipa` | 未签名，LiveContainer / SideStore / TrollStore 直接导入，或自签 |
 
 两个平台都已实测内嵌网关，装上即可用，无需任何外部服务。
+
+> iOS 包每次发布前都会跑 `scripts/verify_ipa.py`：校验 `Info.plist` 关键键、arm64 Mach-O、
+> Go 符号是否真的链进来、桌面图标资源是否齐全。任何一项不过，构建直接失败——不会产出
+> 「装上去才知道是坏包」的产物。
 
 ### 首次使用
 
@@ -67,6 +72,20 @@ cd wild-work-master && GOOS=android GOARCH=arm64 CGO_ENABLED=0 \
   go build -trimpath -ldflags "-s -w" \
   -o ../android/app/src/main/jniLibs/arm64-v8a/libgateway.so ./cmd/wild-work
 cd .. && cd android && gradle assembleRelease
+
+# iOS 只能在 macOS 上构建（需 Xcode 15+ 与 xcodegen）
+python3 scripts/prepare_ios_bridge.py /path/to/upstream bridge
+SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+(cd bridge && CGO_ENABLED=1 GOOS=ios GOARCH=arm64 \
+  CC="$(xcrun --sdk iphoneos --find clang)" \
+  CGO_CFLAGS="-isysroot $SDK -miphoneos-version-min=15.0" \
+  CGO_LDFLAGS="-isysroot $SDK -miphoneos-version-min=15.0" \
+  go build -buildmode=c-archive -trimpath -ldflags "-s -w" \
+  -o ../ios/WildWorkNative/Resources/libwildwork.a ./cmd/wild-work)
+cd ios && xcodegen generate && xcodebuild -project WildWorkNative.xcodeproj \
+  -scheme WildWorkNative -configuration Release -sdk iphoneos \
+  -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
+# 打包成 IPA 与产物校验的完整命令见 .github/workflows/ios.yml 最后两步
 ```
 
 维护说明见 [`docs/MAINTENANCE.md`](docs/MAINTENANCE.md)。

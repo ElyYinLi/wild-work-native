@@ -49,6 +49,9 @@ targets:
         IPHONEOS_DEPLOYMENT_TARGET: "15.0"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: ""
+        # Go 运行时依赖 init_array 里的初始化器，dead code stripping 会把它们当成
+        # 「没人调用」裁掉，表现为启动即崩。整个 App 只有一份静态库，不必省这点体积。
+        DEAD_CODE_STRIPPING: NO
         # Go 静态库（c-archive）由 CI 编译到 Resources/，链接进主 Mach-O。
         # 走静态库而不是子进程：iOS 不允许 exec 未签名二进制，详见 Gateway.swift 注释。
         HEADER_SEARCH_PATHS:

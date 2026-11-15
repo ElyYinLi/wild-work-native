@@ -6,18 +6,25 @@
 
 ## 0. 一句话架构
 
-> 本项目不改上游一行代码，只是**把上游的 Go 网关编译进 App**，用 WebView 打开它自己提供的面板。
+> 本项目不改上游一行代码，只是**把上游的 Go 网关编进 App**，用 WebView 打开它自己提供的面板。
 
 ```
 手机 App
- ├─ WebView ──► 127.0.0.1:7863  (Go 网关子进程提供的原版面板)
- └─ 进程管理 ──► 启动/守护/日志
+ ├─ WebView ──────────────► 127.0.0.1:7863（上游原版面板）
+ ├─ Android：子进程       ──► lib/arm64-v8a/libgateway.so --no-tray
+ └─ iOS：静态库（无子进程）──► libwildwork.a → WildWorkStart()
 ```
 
-由此推出的两条铁律：
+由此推出的三条铁律：
 
 1. **网关永远是上游原样编译**。任何「为了适配手机改网关源码」的念头都要打住——一旦改了，就变成 fork，上游每次更新都要重放补丁。
 2. **UI 不做二次开发**。面板本身已带响应式布局，手机宽度下可用。要改体验应该给上游提 PR，而不是在本项目里重写一套。
+3. **iOS 绝不 spawn 子进程**。原因见第 4 节，这是踩过坑的硬约束。
+
+**两个平台为什么实现不同**：Android 允许 exec 自己私有目录里的文件（借 `lib/*.so` 通道拿到执行位）；
+iOS 只允许 exec「带有效签名、且被 bundle 声明为可执行」的 Mach-O，未签名 IPA 经 LiveContainer /
+SideStore 重签时并不会签 Resources 里的裸二进制。所以 iOS 走静态库，见第 4 节。
+
 
 ---
 
@@ -49,16 +56,25 @@ git commit --allow-empty -m "sync: 跟随上游最新" && git push
 ```
 上游源码 tarball
       │
-      ▼  GOOS/GOARCH 交叉编译
-libgateway.so (android/arm64)  ──┐
-gateway (ios/arm64)              │
-      │                          │
-      ▼                          ▼
- jniLibs/arm64-v8a/         Resources/gateway
-      │                          │
-      ▼                          ▼
-   assembleRelease          xcodebuild → .app → zip → .ipa
+      ├─► GOOS=android GOARCH=arm64 CGO_ENABLED=0
+      │        └─► libgateway.so ─► jniLibs/arm64-v8a/ ─► assembleRelease ─► .apk
+      │
+      └─► prepare_ios_bridge.py（main→runMain、systray 换 stub）
+               │
+               └─► GOOS=ios CGO_ENABLED=1 -buildmode=c-archive
+                        └─► libwildwork.a ─► 链接进主 Mach-O ─► .app ─► .ipa
 ```
+
+iOS 侧多出来的 `prepare_ios_bridge.py` 只做三件机械替换（不碰业务逻辑）：
+
+| 动作 | 原因 |
+|------|------|
+| `func main()` → `func runMain()` | c-archive 的入口是 `//export` 函数，不是 `main()` |
+| 注入 `zz_ios_bridge.go` | 提供 `WildWorkStart(home, port)`：设 `WILDWORK_HOME`、日志落盘、`--no-tray`、后台跑 `runMain()` |
+| `internal/systray` 换 stub | iOS 没有托盘，且原实现依赖 macOS AppKit，链接必炸 |
+
+上游若改了 `main()` 的形态，脚本会在 `func main() {` 匹配失败时**明确报错退出**，不会静默产出坏包。
+
 
 ### 关键决策：为什么安卓端叫 `libgateway.so`
 
@@ -111,25 +127,63 @@ packaging { jniLibs { useLegacyPackaging = true } }  // 必须解压出来才可
 
 ---
 
-## 4. iOS 能否内嵌网关
+## 4. iOS 为什么必须用静态库
 
-**当前状态：可以**（`macos-latest` 上的 Xcode 链接器链可用，CI 已实测通过）。
+### 踩过的坑（2024-11）
 
-技术背景（构建失败时用得上）：
+第一版把 `gateway` 当资源放进 bundle，运行时复制到 Documents 再 `posix_spawn`。结果：
 
-- Go 对 `ios/arm64` 的产物必须是 **PIE**；
-- 而 `platform.InternalLinkPIESupported("ios", "arm64")` 为 `false`，即 Go 不能用内部链接器产出 PIE；
-- 于是 `CGO_ENABLED=0` 时直接报：
-  `ios/arm64 requires external (cgo) linking, but cgo is not enabled`；
-- 需要 `CGO_ENABLED=1` + iPhoneOS SDK + Xcode 的 `ld` 才能成功。
+```
+Failed to map /var/mobile/Containers/Data/Application/<UUID>/Documents/Applications/Unknown.app/(null):
+Bad file descriptor
+```
 
-此外上游依赖的 `energye/systray` 有一处构建缺陷：`systray_darwin.go` **没有 `//go:build darwin`**，
-所以 `GOOS=ios` 时也会被编进去，引入 `#cgo darwin` 指令。
-若未来 CI 报 cgo 相关错误，按这个思路处理：本地复制该包、补 build tag、用 `replace` 指过去（不要改上游）。
+两个独立故障叠在一起：
 
-> 万一某天两条路都失败，流水线会**自动降级为客户端版**（不内嵌网关）并照常出包，
-> Release 说明里写「内置网关：false」。此时 App 需要连接局域网内的网关设备。
-> 这不是故障，是设计好的降级路径。
+1. **包本身是坏的**。`xcodebuild ... | tail -60` 让管道把退出码换成了 `tail` 的 0，
+   构建失败也照常打包 → IPA 里只有一个 `gateway` 文件，**没有 Info.plist**。
+   LiveContainer 取不到 `CFBundleExecutable`（日志里的 `(null)`），于是 app 名显示 `Unknown`、
+   图标空白、映射失败。
+2. **就算包是好的，子进程也起不来**。iOS 内核只允许 exec「带有效签名、且位于 app bundle 内」
+   的 Mach-O。LiveContainer 重签只签主可执行文件，Resources 里的裸二进制不会被签，
+   `posix_spawn` 一律 `Bad file descriptor` / 启动即 SIGKILL。这不是配置问题，是平台限制。
+
+### 现在的做法
+
+```
+Go 源码 ──(c-archive)──► libwildwork.a + libwildwork.h
+                                    │
+Swift: WildWorkStart(home, port) ───┘  直接链进主 Mach-O
+```
+
+- **没有子进程**，重签与否都不影响；
+- Go 的 `//export` 函数在进程内起 goroutine 跑 `runMain()`，服务监听 `127.0.0.1:7863`；
+- 日志写 `<Documents>/wildwork/gateway.log`（iOS 没有可读的 stdout），Swift 侧读增量刷新启动页。
+
+### 构建侧的两个硬约束
+
+- `GOOS=ios` 的 Go 产物必须是 PIE，而 `InternalLinkPIESupported("ios")` 为 `false`，
+  所以 `CGO_ENABLED=0` 会直接报 `requires external (cgo) linking`。必须
+  `CGO_ENABLED=1` + `CC=$(xcrun --sdk iphoneos --find clang)` + `-isysroot`。
+- Go 运行时依赖 `init_array` 里的初始化器，**`DEAD_CODE_STRIPPING` 必须为 NO**，
+  否则链接器会把「没人调用」的初始化代码裁掉，表现为装上去就闪退。
+
+### 产物必须过 `verify_ipa.py`
+
+CI 在打包后强制执行 `scripts/verify_ipa.py`，任一项不过就红：
+
+| 检查项 | 对应事故 |
+|--------|---------|
+| `Payload/` 下恰好一个 `.app` | 目录结构不合规，装机工具直接解析失败 |
+| `Info.plist` 存在且 `CFBundleExecutable` 与 app 名一致 | `Unknown.app/(null)` |
+| `CFBundleDisplayName` / `CFBundleIdentifier` 正确 | 桌面名字不对、覆盖安装冲突 |
+| 主可执行文件 ≥100KB、有执行位、arm64 Mach-O | 空壳包 / `posix_spawn` 失败 |
+| 二进制含 `WildWorkStart` | 网关没链进来，启动卡在「服务启动失败」 |
+| `Assets.car` 存在或有 `CFBundleIconFiles` | 桌面图标空白 |
+
+`scripts/inject_icons.py` 是图标兜底：actool 正常时什么都不做，异常时补传统
+`CFBundleIconFiles` + 标准命名 PNG（`AppIcon60x60@2x.png` 等）。
+
 
 ---
 
@@ -137,12 +191,15 @@ packaging { jniLibs { useLegacyPackaging = true } }  // 必须解压出来才可
 
 | 现象 | 原因 | 处理 |
 |------|------|------|
-| 启动页一直转圈 | 网关没起来 | 看启动页底部日志；多半是二进制缺失或不可执行 |
+| 启动页一直转圈 | 网关没起来 | 看启动页底部日志（iOS 直接读 `Documents/wildwork/gateway.log`） |
 | 提示「内置网关缺失」 | APK 装错架构 | 确认手机是 arm64（现代手机均是）；检查 `lib/arm64-v8a/libgateway.so` 是否存在 |
 | 启动后立刻「服务已退出」 | 端口被占 / 数据目录不可写 | 看日志；确认 `WILDWORK_HOME` 指向可写目录 |
 | 白屏但能返回 | 面板 JS 报错 | 长按刷新；或用手机浏览器直连 `http://127.0.0.1:7863` 看真实报错 |
-| 后台一段时间后接口不通 | 系统回收子进程 | App 回前台会自动重启（`ensureAlive`） |
-| iOS 装完闪退 | 子进程被签名破坏 | 换 SideStore 重签；或参照第 4 节排查看是否走了 cgo 路径 |
+| 后台一段时间后接口不通 | 系统挂起 App | 回前台自动恢复（`ensureAlive` 探活 + 重新拉起） |
+| iOS 装机报 `Unknown.app/(null): Bad file descriptor` | IPA 缺 Info.plist，或主二进制无执行位 | 跑 `python3 scripts/verify_ipa.py <ipa> ...` 定位；CI 已强制校验 |
+| iOS 装完桌面无图标、App 内正常 | 缺 Assets.car / CFBundleIcons | 同上；`inject_icons.py` 已做兜底 |
+| iOS 桌面名字显示为 `Unknown` | `CFBundleExecutable` 为空 | 同上，根因是 Info.plist 缺失 |
+| iOS 装完秒退 | 静态库被 dead-strip / 签名被破坏 | 确认 `DEAD_CODE_STRIPPING: NO`；换 SideStore 重签试试 |
 | CI 里 iOS job `cancelled` 且无 runner | runner 标签不可用 | 只用 `macos-latest`；`macos-14` 已下线 |
 
 ---
@@ -151,10 +208,13 @@ packaging { jniLibs { useLegacyPackaging = true } }  // 必须解压出来才可
 
 1. **不要 fork 网关源码**。所有适配靠环境变量与参数，不靠改代码。
 2. **不要把网关放进 `assets/`**。没有执行位，chmod 在很多 ROM 上无效。
-3. **不要提交二进制到仓库**。`libgateway.so` / `gateway` 已在 `.gitignore`，由 CI 构建注入。
-4. **不要在 App 里硬编码端口**。三处常量必须同步改。
-5. **不要给面板做二次 UI 覆盖**。要改体验就推动上游，否则每次上游改版都要重新适配。
-6. **不要把监听地址改成 `0.0.0.0` 而不设密码**。上游会直接拒绝启动。
+3. **不要在 iOS 上用子进程跑网关**。未签名二进制无法 exec，见第 4 节。必须保持 c-archive 方案。
+4. **不要给 `xcodebuild` 接管道**。`cmd | tail` 会把失败退出码换成 `tail` 的 0，构建失败也照样出包。
+5. **不要提交二进制到仓库**。`libgateway.so` / `libwildwork.a` 已在 `.gitignore`，由 CI 构建注入。
+6. **不要在 App 里硬编码端口**。三处常量必须同步改。
+7. **不要给面板做二次 UI 覆盖**。要改体验就推动上游，否则每次上游改版都要重新适配。
+8. **不要把监听地址改成 `0.0.0.0` 而不设密码**。上游会直接拒绝启动。
+9. **不要删掉 CI 里的 `verify_ipa.py`**。它是唯一能挡住「装不上的 IPA」的关卡。
 
 ---
 
@@ -164,7 +224,9 @@ packaging { jniLibs { useLegacyPackaging = true } }  // 必须解压出来才可
 |----|-----|------|
 | 网关端口 | 7863 | `GatewayService.PORT` / `Gateway.port` |
 | 网关可执行文件（Android） | `lib/arm64-v8a/libgateway.so` | `android/app/src/main/jniLibs/` |
-| 网关可执行文件（iOS） | `gateway`（bundle 根） | `ios/WildWorkNative/Resources/` |
+| 网关静态库（iOS） | `libwildwork.a` + `libwildwork.h` | `ios/WildWorkNative/Resources/` |
+| iOS 导出函数 | `int WildWorkStart(char* home, int port)` | `cmd/wild-work/zz_ios_bridge.go` |
+| iOS 显示名 / bundle 名 | `WildWork` | `ios/project.yml` 的 `PRODUCT_NAME` / `CFBundleDisplayName` |
 | Android 包名 | `com.wildwork.nativeapp` | `app/build.gradle.kts` |
 | iOS Bundle ID | `com.wildwork.nativeapp` | `ios/project.yml` |
 | 数据目录（Android） | `filesDir/ww` | `GatewayService` |
